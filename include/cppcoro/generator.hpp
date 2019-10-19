@@ -13,13 +13,62 @@
 
 namespace cppcoro
 {
-	template<typename T>
+	template<typename T, bool NoExcept = false>
 	class generator;
 
 	namespace detail
 	{
-		template<typename T>
-		class generator_promise
+		class empty_base {};
+
+		template<bool NoExcept, typename Base = empty_base>
+		class exception_promise;
+
+		template<typename Base>
+		class exception_promise<false,Base> : public Base
+		{
+		protected:
+			exception_promise() noexcept = default;
+			exception_promise(const exception_promise&) = delete;
+			exception_promise(exception_promise&&) = delete;
+
+			std::exception_ptr m_exception = nullptr;
+
+		public:
+			void unhandled_exception() noexcept
+			{
+				m_exception = std::current_exception();
+			}
+
+			void rethrow_if_exception()
+			{
+				if (m_exception != nullptr)
+				{
+					std::rethrow_exception(std::move(m_exception));
+				}
+			}
+		};
+
+		template<typename Base>
+		class exception_promise<true,Base> : public Base
+		{
+		protected:
+			exception_promise() noexcept = default;
+			exception_promise(const exception_promise&) = delete;
+			exception_promise(exception_promise&&) = delete;
+
+		public:
+			void unhandled_exception() noexcept
+			{
+				std::terminate();
+			}
+
+			void rethrow_if_exception() noexcept
+			{
+			}
+		};
+
+		template<typename T, bool NoExcept>
+		class generator_promise final : public exception_promise<NoExcept>
 		{
 		public:
 
@@ -29,7 +78,7 @@ namespace cppcoro
 
 			generator_promise() = default;
 
-			generator<T> get_return_object() noexcept;
+			generator<T,NoExcept> get_return_object() noexcept;
 
 			constexpr std::experimental::suspend_always initial_suspend() const { return {}; }
 			constexpr std::experimental::suspend_always final_suspend() const { return {}; }
@@ -49,12 +98,7 @@ namespace cppcoro
 				return {};
 			}
 
-			void unhandled_exception()
-			{
-				m_exception = std::current_exception();
-			}
-
-			void return_void()
+			void return_void() const noexcept
 			{
 			}
 
@@ -67,42 +111,34 @@ namespace cppcoro
 			template<typename U>
 			std::experimental::suspend_never await_transform(U&& value) = delete;
 
-			void rethrow_if_exception()
-			{
-				if (m_exception)
-				{
-					std::rethrow_exception(m_exception);
-				}
-			}
-
 		private:
 
 			pointer_type m_value;
-			std::exception_ptr m_exception;
 
 		};
 
-        struct generator_sentinel {};
+		struct generator_sentinel {};
 
-		template<typename T>
+		template<typename T, bool NoExcept>
 		class generator_iterator
 		{
-			using coroutine_handle = std::experimental::coroutine_handle<generator_promise<T>>;
+			using coroutine_handle = std::experimental::coroutine_handle<generator_promise<T,NoExcept>>;
 
 		public:
 
 			using iterator_category = std::input_iterator_tag;
 			// What type should we use for counting elements of a potentially infinite sequence?
 			using difference_type = std::ptrdiff_t;
-			using value_type = typename generator_promise<T>::value_type;
-			using reference = typename generator_promise<T>::reference_type;
-			using pointer = typename generator_promise<T>::pointer_type;
+			using value_type = typename generator_promise<T,NoExcept>::value_type;
+			using reference = typename generator_promise<T,NoExcept>::reference_type;
+			using pointer = typename generator_promise<T,NoExcept>::pointer_type;
+            static constexpr bool yield_noexcept = NoExcept;
 
 			// Iterator needs to be default-constructible to satisfy the Range concept.
 			generator_iterator() noexcept
 				: m_coroutine(nullptr)
 			{}
-			
+
 			explicit generator_iterator(coroutine_handle coroutine) noexcept
 				: m_coroutine(coroutine)
 			{}
@@ -127,7 +163,7 @@ namespace cppcoro
 				return it != s;
 			}
 
-			generator_iterator& operator++()
+			generator_iterator& operator++() noexcept(NoExcept)
 			{
 				m_coroutine.resume();
 				if (m_coroutine.done())
@@ -139,7 +175,7 @@ namespace cppcoro
 			}
 
 			// Need to provide post-increment operator to implement the 'Range' concept.
-			void operator++(int)
+			void operator++(int) noexcept(NoExcept)
 			{
 				(void)operator++();
 			}
@@ -160,13 +196,13 @@ namespace cppcoro
 		};
 	}
 
-	template<typename T>
+	template<typename T, bool NoExcept>
 	class [[nodiscard]] generator
 	{
 	public:
 
-		using promise_type = detail::generator_promise<T>;
-		using iterator = detail::generator_iterator<T>;
+		using promise_type = detail::generator_promise<T,NoExcept>;
+		using iterator = detail::generator_iterator<T,NoExcept>;
 
 		generator() noexcept
 			: m_coroutine(nullptr)
@@ -194,7 +230,7 @@ namespace cppcoro
 			return *this;
 		}
 
-		iterator begin()
+		iterator begin() noexcept(NoExcept)
 		{
 			if (m_coroutine)
 			{
@@ -220,7 +256,7 @@ namespace cppcoro
 
 	private:
 
-		friend class detail::generator_promise<T>;
+		friend class detail::generator_promise<T, NoExcept>;
 
 		explicit generator(std::experimental::coroutine_handle<promise_type> coroutine) noexcept
 			: m_coroutine(coroutine)
@@ -230,24 +266,24 @@ namespace cppcoro
 
 	};
 
-	template<typename T>
-	void swap(generator<T>& a, generator<T>& b)
+	template<typename T, bool NoExcept>
+	void swap(generator<T,NoExcept>& a, generator<T,NoExcept>& b)
 	{
 		a.swap(b);
 	}
 
 	namespace detail
 	{
-		template<typename T>
-		generator<T> generator_promise<T>::get_return_object() noexcept
+		template<typename T, bool NoExcept>
+		generator<T,NoExcept> generator_promise<T,NoExcept>::get_return_object() noexcept
 		{
-			using coroutine_handle = std::experimental::coroutine_handle<generator_promise<T>>;
-			return generator<T>{ coroutine_handle::from_promise(*this) };
+			using coroutine_handle = std::experimental::coroutine_handle<generator_promise<T,NoExcept>>;
+			return generator<T,NoExcept> { coroutine_handle::from_promise(*this) };
 		}
 	}
 
-	template<typename FUNC, typename T>
-	generator<std::invoke_result_t<FUNC&, typename generator<T>::iterator::reference>> fmap(FUNC func, generator<T> source)
+	template<typename FUNC, typename T, bool NoExcept>
+	generator<std::invoke_result_t<FUNC&, typename generator<T,NoExcept>::iterator::reference>> fmap(FUNC func, generator<T,NoExcept> source)
 	{
 		for (auto&& value : source)
 		{

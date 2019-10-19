@@ -15,28 +15,24 @@
 
 namespace cppcoro
 {
-	template<typename T>
+	template<typename T, bool NoExcept = false>
 	class recursive_generator
 	{
 	public:
 
-		class promise_type final
+		class promise_type final : public detail::exception_promise<NoExcept>
 		{
 		public:
 
 			promise_type() noexcept
 				: m_value(nullptr)
-				, m_exception(nullptr)
 				, m_root(this)
 				, m_parentOrLeaf(this)
 			{}
 
-			promise_type(const promise_type&) = delete;
-			promise_type(promise_type&&) = delete;
-
 			auto get_return_object() noexcept
 			{
-				return recursive_generator<T>{ *this };
+				return recursive_generator<T,NoExcept>{ *this };
 			}
 
 			std::experimental::suspend_always initial_suspend() noexcept
@@ -47,11 +43,6 @@ namespace cppcoro
 			std::experimental::suspend_always final_suspend() noexcept
 			{
 				return {};
-			}
-
-			void unhandled_exception() noexcept
-			{
-				m_exception = std::current_exception();
 			}
 
 			void return_void() noexcept {}
@@ -90,11 +81,11 @@ namespace cppcoro
 					void await_suspend(std::experimental::coroutine_handle<promise_type>) noexcept
 					{}
 
-					void await_resume()
+					void await_resume() noexcept( NoExcept )
 					{
 						if (this->m_childPromise != nullptr)
 						{
-							this->m_childPromise->throw_if_exception();
+							this->m_childPromise->rethrow_if_exception();
 						}
 					}
 
@@ -127,14 +118,6 @@ namespace cppcoro
 			void destroy() noexcept
 			{
 				std::experimental::coroutine_handle<promise_type>::from_promise(*this).destroy();
-			}
-
-			void throw_if_exception()
-			{
-				if (m_exception != nullptr)
-				{
-					std::rethrow_exception(std::move(m_exception));
-				}
 			}
 
 			bool is_complete() noexcept
@@ -171,7 +154,6 @@ namespace cppcoro
 			}
 
 			std::add_pointer_t<T> m_value;
-			std::exception_ptr m_exception;
 
 			promise_type* m_root;
 
@@ -252,7 +234,7 @@ namespace cppcoro
 				return m_promise != other.m_promise;
 			}
 
-			iterator& operator++()
+			iterator& operator++() noexcept(NoExcept)
 			{
 				assert(m_promise != nullptr);
 				assert(!m_promise->is_complete());
@@ -262,13 +244,13 @@ namespace cppcoro
 				{
 					auto* temp = m_promise;
 					m_promise = nullptr;
-					temp->throw_if_exception();
+					temp->rethrow_if_exception();
 				}
 
 				return *this;
 			}
 
-			void operator++(int)
+			void operator++(int) noexcept(NoExcept)
 			{
 				(void)operator++();
 			}
@@ -290,7 +272,7 @@ namespace cppcoro
 
 		};
 
-		iterator begin()
+		iterator begin() noexcept(NoExcept)
 		{
 			if (m_promise != nullptr)
 			{
@@ -300,7 +282,7 @@ namespace cppcoro
 					return iterator(m_promise);
 				}
 
-				m_promise->throw_if_exception();
+				m_promise->rethrow_if_exception();
 			}
 
 			return iterator(nullptr);
@@ -324,16 +306,16 @@ namespace cppcoro
 
 	};
 
-	template<typename T>
-	void swap(recursive_generator<T>& a, recursive_generator<T>& b) noexcept
+	template<typename T, bool NoExcept>
+	void swap(recursive_generator<T,NoExcept>& a, recursive_generator<T,NoExcept>& b) noexcept
 	{
 		a.swap(b);
 	}
 
 	// Note: When applying fmap operator to a recursive_generator we just yield a non-recursive
 	// generator since we generally won't be using the result in a recursive context.
-	template<typename FUNC, typename T>
-	generator<std::invoke_result_t<FUNC&, typename recursive_generator<T>::iterator::reference>> fmap(FUNC func, recursive_generator<T> source)
+	template<typename FUNC, typename T, bool NoExcept>
+	generator<std::invoke_result_t<FUNC&, typename recursive_generator<T,NoExcept>::iterator::reference>> fmap(FUNC func, recursive_generator<T,NoExcept> source)
 	{
 		for (auto&& value : source)
 		{
