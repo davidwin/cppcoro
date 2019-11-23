@@ -21,6 +21,8 @@ namespace cppcoro
 		using awaiter_t = decltype(cppcoro::detail::get_awaiter(std::declval<T>()));
 
 		using await_result_t = decltype(std::declval<awaiter_t>().await_resume());
+
+		static constexpr bool await_noexcept = noexcept(std::declval<awaiter_t>().await_resume());
 	};
 }
 
