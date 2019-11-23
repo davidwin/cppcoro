@@ -10,6 +10,7 @@
 #include <cppcoro/broken_promise.hpp>
 
 #include <cppcoro/detail/remove_rvalue_reference.hpp>
+#include <cppcoro/detail/exception_promise.hpp>
 
 #include <atomic>
 #include <exception>
@@ -22,7 +23,7 @@
 
 namespace cppcoro
 {
-	template<typename T> class task;
+	template<typename T = void, bool NoExcept = false> class task;
 
 	namespace detail
 	{
@@ -113,8 +114,10 @@ namespace cppcoro
 
 		};
 
+        template<typename T, bool NoExcept> class task_promise;
+
 		template<typename T>
-		class task_promise final : public task_promise_base
+		class task_promise<T, false> final : public task_promise_base
 		{
 		public:
 
@@ -203,50 +206,94 @@ namespace cppcoro
 
 		};
 
-		template<>
-		class task_promise<void> : public task_promise_base
+        template<typename T>
+		class task_promise<T, true> final : public task_promise_base
 		{
 		public:
 
+			task_promise() noexcept {}
+
+			~task_promise()
+			{
+				if (m_hasValue)
+				{
+					m_value.~T();
+				}
+			}
+
+			task<T, true> get_return_object() noexcept;
+
+			void unhandled_exception() noexcept { std::terminate(); }
+
+			template<
+				typename VALUE,
+				typename = std::enable_if_t<std::is_convertible_v<VALUE&&, T>>>
+			void return_value(VALUE&& value)
+				noexcept(std::is_nothrow_constructible_v<T, VALUE&&>) // TODO: Should this always be noexcept?
+			{
+				::new (static_cast<void*>(std::addressof(m_value))) T(std::forward<VALUE>(value));
+				m_hasValue = true;
+			}
+
+			T& result() &
+			{
+				assert(m_hasValue);
+
+				return m_value;
+			}
+
+			// HACK: Need to have co_await of task<int> return prvalue rather than
+			// rvalue-reference to work around an issue with MSVC where returning
+			// rvalue reference of a fundamental type from await_resume() will
+			// cause the value to be copied to a temporary. This breaks the
+			// sync_wait() implementation.
+			// See https://github.com/lewissbaker/cppcoro/issues/40#issuecomment-326864107
+			using rvalue_type = std::conditional_t<
+				std::is_arithmetic_v<T> || std::is_pointer_v<T>,
+				T,
+				T&&>;
+
+			rvalue_type result() &&
+			{
+				assert(m_hasValue);
+
+				return std::move(m_value);
+			}
+
+		private:
+			union
+			{
+				T m_value;
+			};
+			bool m_hasValue = false;
+		};
+
+		template<bool NoExcept>
+		class task_promise<void, NoExcept> : public exception_promise<NoExcept, task_promise_base>
+		{
+		public:
 			task_promise() noexcept = default;
 
-			task<void> get_return_object() noexcept;
+			task<void, NoExcept> get_return_object() noexcept;
 
 			void return_void() noexcept
 			{}
 
-			void unhandled_exception() noexcept
-			{
-				m_exception = std::current_exception();
-			}
-
 			void result()
 			{
-				if (m_exception)
-				{
-					std::rethrow_exception(m_exception);
-				}
+				this->rethrow_if_exception();
 			}
-
-		private:
-
-			std::exception_ptr m_exception;
-
 		};
 
-		template<typename T>
-		class task_promise<T&> : public task_promise_base
+		template<typename T, bool NoExcept>
+		class task_promise<T&, NoExcept> : public exception_promise<NoExcept, task_promise_base>
 		{
 		public:
 
 			task_promise() noexcept = default;
 
-			task<T&> get_return_object() noexcept;
+			task<T&, NoExcept> get_return_object() noexcept;
 
-			void unhandled_exception() noexcept
-			{
-				m_exception = std::current_exception();
-			}
 
 			void return_value(T& value) noexcept
 			{
@@ -255,10 +302,7 @@ namespace cppcoro
 
 			T& result()
 			{
-				if (m_exception)
-				{
-					std::rethrow_exception(m_exception);
-				}
+				this->rethrow_if_exception();
 
 				return *m_value;
 			}
@@ -266,7 +310,6 @@ namespace cppcoro
 		private:
 
 			T* m_value = nullptr;
-			std::exception_ptr m_exception;
 
 		};
 	}
@@ -279,12 +322,12 @@ namespace cppcoro
 	/// simply captures any passed parameters and returns exeuction to the
 	/// caller. Execution of the coroutine body does not start until the
 	/// coroutine is first co_await'ed.
-	template<typename T = void>
+	template<typename T, bool NoExcept>
 	class [[nodiscard]] task
 	{
 	public:
 
-		using promise_type = detail::task_promise<T>;
+		using promise_type = detail::task_promise<T, NoExcept>;
 
 		using value_type = T;
 
@@ -395,11 +438,15 @@ namespace cppcoro
 			{
 				using awaitable_base::awaitable_base;
 
-				decltype(auto) await_resume()
+                // NOTE: When the task is NoExcept, we will terminate on broken promise instead of throwing.
+				decltype(auto) await_resume() noexcept(NoExcept)
 				{
 					if (!this->m_coroutine)
 					{
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wexceptions"
 						throw broken_promise{};
+#pragma GCC diagnostic pop
 					}
 
 					return this->m_coroutine.promise().result();
@@ -415,11 +462,15 @@ namespace cppcoro
 			{
 				using awaitable_base::awaitable_base;
 
-				decltype(auto) await_resume()
+                // NOTE: When the task is NoExcept, we will terminate on broken promise instead of throwing.
+				decltype(auto) await_resume() noexcept(NoExcept)
 				{
 					if (!this->m_coroutine)
 					{
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wexceptions"
 						throw broken_promise{};
+#pragma GCC diagnostic pop
 					}
 
 					return std::move(this->m_coroutine.promise()).result();
@@ -453,20 +504,27 @@ namespace cppcoro
 	namespace detail
 	{
 		template<typename T>
-		task<T> task_promise<T>::get_return_object() noexcept
+		task<T, false> task_promise<T, false>::get_return_object() noexcept
 		{
-			return task<T>{ std::experimental::coroutine_handle<task_promise>::from_promise(*this) };
+			return task<T, false>{ std::experimental::coroutine_handle<task_promise>::from_promise(*this) };
 		}
 
-		inline task<void> task_promise<void>::get_return_object() noexcept
+        template<typename T>
+		task<T, true> task_promise<T, true>::get_return_object() noexcept
 		{
-			return task<void>{ std::experimental::coroutine_handle<task_promise>::from_promise(*this) };
+			return task<T, true>{ std::experimental::coroutine_handle<task_promise>::from_promise(*this) };
 		}
 
-		template<typename T>
-		task<T&> task_promise<T&>::get_return_object() noexcept
+        template<bool NoExcept>
+		inline task<void, NoExcept> task_promise<void, NoExcept>::get_return_object() noexcept
 		{
-			return task<T&>{ std::experimental::coroutine_handle<task_promise>::from_promise(*this) };
+			return task<void, NoExcept>{ std::experimental::coroutine_handle<task_promise>::from_promise(*this) };
+		}
+
+		template<typename T, bool NoExcept>
+		task<T&, NoExcept> task_promise<T&, NoExcept>::get_return_object() noexcept
+		{
+			return task<T&, NoExcept>{ std::experimental::coroutine_handle<task_promise>::from_promise(*this) };
 		}
 	}
 
@@ -475,6 +533,20 @@ namespace cppcoro
 		-> task<detail::remove_rvalue_reference_t<typename awaitable_traits<AWAITABLE>::await_result_t>>
 	{
 		co_return co_await static_cast<AWAITABLE&&>(awaitable);
+	}
+
+    template<typename AWAITABLE, bool NoExcept>
+	auto make_task(AWAITABLE awaitable, std::integral_constant<bool, NoExcept>)
+		-> task<detail::remove_rvalue_reference_t<typename awaitable_traits<AWAITABLE>::await_result_t>, NoExcept>
+	{
+		co_return co_await static_cast<AWAITABLE&&>(awaitable);
+	}
+
+    // Specialization for when the awaitable already is a task<T> that does nothing
+    template<typename T, bool NoExcept>
+    inline task<T, NoExcept> make_task(task<T, NoExcept> && task, std::integral_constant<bool, NoExcept> = {}) noexcept
+    {
+		return task;
 	}
 }
 
