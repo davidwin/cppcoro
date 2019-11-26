@@ -235,7 +235,7 @@ namespace cppcoro
 				m_hasValue = true;
 			}
 
-			T& result() &
+			T& result() & noexcept
 			{
 				assert(m_hasValue);
 
@@ -253,7 +253,7 @@ namespace cppcoro
 				T,
 				T&&>;
 
-			rvalue_type result() &&
+			rvalue_type result() && noexcept
 			{
 				assert(m_hasValue);
 
@@ -279,7 +279,7 @@ namespace cppcoro
 			void return_void() noexcept
 			{}
 
-			void result()
+			void result() noexcept(NoExcept)
 			{
 				this->rethrow_if_exception();
 			}
@@ -300,7 +300,7 @@ namespace cppcoro
 				m_value = std::addressof(value);
 			}
 
-			T& result()
+			T& result() noexcept(NoExcept)
 			{
 				this->rethrow_if_exception();
 
